@@ -9,5 +9,6 @@ dist/
 coverage/
 *.tsbuildinfo
 *.pyc
+.env*
 backend/.model-cache/
 backend/uploads/
