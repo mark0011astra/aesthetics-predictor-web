@@ -1,15 +1,16 @@
 from io import BytesIO
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageColor
 from fastapi.testclient import TestClient
 
 from app.color_transforms import PRESETS, apply_preset, preview_data_url, refine_presets
 from app.image_io import ImageValidationError, load_image_bytes, validate_file_count
 from app.multi_scorer import build_metric_scores
 from app.ranking import beautiful_label, rank_scores
-from app.contracts import ImageScore
+from app.contracts import ColorTripletExploreResponse, ImageScore
 from app.main import app
+from app.tricolor_search import RGB_TRIPLET_PALETTE, build_triplet_image, explore_triplets
 
 
 def make_image_bytes(fmt: str = "PNG") -> bytes:
@@ -109,6 +110,40 @@ def test_refine_presets_expands_top_color_candidates() -> None:
     assert all(preset.id.startswith("refine-") for preset in refinements)
 
 
+def test_build_triplet_image_splits_into_three_vertical_bands() -> None:
+    image = build_triplet_image((RGB_TRIPLET_PALETTE[0], RGB_TRIPLET_PALETTE[1], RGB_TRIPLET_PALETTE[2]), size=1000)
+
+    assert image.size == (1000, 1000)
+    assert image.getpixel((40, 40)) == ImageColor.getrgb(RGB_TRIPLET_PALETTE[0].hex)
+    assert image.getpixel((500, 40)) == ImageColor.getrgb(RGB_TRIPLET_PALETTE[1].hex)
+    assert image.getpixel((960, 40)) == ImageColor.getrgb(RGB_TRIPLET_PALETTE[2].hex)
+
+
+def test_triplet_search_ranks_best_combination_first() -> None:
+    target = (RGB_TRIPLET_PALETTE[0], RGB_TRIPLET_PALETTE[4], RGB_TRIPLET_PALETTE[5])
+    lookup = {ImageColor.getrgb(swatch.hex): swatch.id for swatch in RGB_TRIPLET_PALETTE}
+
+    class StubPredictor:
+        def score(self, image: Image.Image) -> float:
+            bands = (
+                lookup[image.getpixel((40, 40))],
+                lookup[image.getpixel((500, 40))],
+                lookup[image.getpixel((960, 40))],
+            )
+            return 9.8 if bands == tuple(swatch.id for swatch in target) else 2.0
+
+    total, candidates = explore_triplets(StubPredictor(), limit=5, size=1000)
+
+    assert total == 2197
+    assert len(candidates) == 5
+    assert candidates[0].left.id == target[0].id
+    assert candidates[0].middle.id == target[1].id
+    assert candidates[0].right.id == target[2].id
+    assert candidates[0].score == 9.8
+    assert candidates[0].features.mean_luminance is not None
+    assert candidates[0].tags
+
+
 def test_score_endpoint_returns_explicit_predictor_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     def unavailable() -> object:
         raise RuntimeError("model unavailable")
@@ -162,3 +197,32 @@ def test_score_endpoint_returns_combined_and_individual_metrics(monkeypatch: pyt
     assert metrics["total"] is not None
     assert metrics["balanced"] is not None
     assert metrics["harmonic"] is not None
+
+
+def test_tricolor_start_endpoint_returns_job_shell(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_start_job(limit: int, size: int) -> ColorTripletExploreResponse:
+        return ColorTripletExploreResponse(
+            jobId="job-123",
+            status="queued",
+            canvasSize=size,
+            palette=[],
+            totalCombinations=2197,
+            completedCombinations=0,
+            limit=limit,
+            bestScore=None,
+            current=None,
+            device="cpu",
+            variants=[],
+            error=None,
+        )
+
+    monkeypatch.setattr("app.main.start_triplet_job", fake_start_job)
+    client = TestClient(app)
+
+    response = client.post("/api/tricolor-explore", data={"limit": "24"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["jobId"] == "job-123"
+    assert payload["status"] == "queued"
+    assert payload["totalCombinations"] == 2197

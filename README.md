@@ -30,6 +30,12 @@ The default ranking uses `total`, which is the mean of the normalized LAION scor
 
 This is not an absolute beauty judgment. Evaluations vary by culture, use case, personal taste, and image category, so the UI centers score and rank, and only shows a supplemental "beautiful" label above the threshold.
 
+### 三分割色探索 / Three-Band Color Search
+
+1000×1000 の正方形を縦に 3 分割した synthetic image を作り、RGB パレット 13 色の全組み合わせを exhaustive に評価します。合計 2197 通りの組み合わせをスコア順に並べ、進捗と特徴量を見ながら上位だけを表示します。
+
+The app also generates a synthetic 1000×1000 square split vertically into 3 bands and exhaustively evaluates every combination from a 13-color RGB palette. That is 2197 total combinations, ranked by score, with progress and feature visualizations shown alongside the top results.
+
 ## 構成 / Structure
 
 - `backend/`: FastAPI API。画像検証、スコアリング、ランキング、色変更探索を担当します。/ FastAPI API for image validation, scoring, ranking, and color exploration.

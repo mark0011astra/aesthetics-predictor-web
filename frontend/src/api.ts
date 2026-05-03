@@ -1,4 +1,4 @@
-import type { ColorExploreResponse, ScoreResponse } from './types';
+import type { ColorExploreResponse, ColorTripletExploreResponse, ScoreResponse } from './types';
 
 const API_BASE = '';
 
@@ -36,6 +36,32 @@ export async function exploreColors(file: File, threshold: number): Promise<Colo
   return response.json();
 }
 
+export async function exploreTriplets(limit = 24): Promise<ColorTripletExploreResponse> {
+  const body = new FormData();
+  body.append('limit', String(limit));
+
+  const response = await fetch(`${API_BASE}/api/tricolor-explore`, {
+    method: 'POST',
+    body
+  });
+
+  if (!response.ok) {
+    throw new Error(await responseText(response));
+  }
+
+  return response.json();
+}
+
+export async function getTripletExplore(jobId: string): Promise<ColorTripletExploreResponse> {
+  const response = await fetch(`${API_BASE}/api/tricolor-explore/${jobId}`);
+
+  if (!response.ok) {
+    throw new Error(await responseText(response));
+  }
+
+  return response.json();
+}
+
 async function responseText(response: Response): Promise<string> {
   try {
     const payload = await response.json();
@@ -44,4 +70,3 @@ async function responseText(response: Response): Promise<string> {
     return 'Request failed.';
   }
 }
-

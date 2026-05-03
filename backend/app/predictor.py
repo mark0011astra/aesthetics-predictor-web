@@ -72,12 +72,16 @@ class AestheticPredictor:
         self.mlp.eval()
 
     def score(self, image: Image.Image) -> float:
+        return self.score_batch([image])[0]
+
+    def score_batch(self, images: list[Image.Image]) -> list[float]:
         with self.torch.no_grad():
-            tensor = self.preprocess(image).unsqueeze(0).to(self.device)
-            features = self.model.encode_image(tensor)
+            tensors = [self.preprocess(image) for image in images]
+            batch = self.torch.stack(tensors).to(self.device)
+            features = self.model.encode_image(batch)
             features = features / features.norm(dim=-1, keepdim=True)
-            raw = self.mlp(features).squeeze().item()
-            return float(max(0, min(10, raw)))
+            raw = self.mlp(features).squeeze(-1)
+            return [float(max(0, min(10, value.item()))) for value in raw]
 
     @staticmethod
     def _select_device(torch_module: object) -> str:

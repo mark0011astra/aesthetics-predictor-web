@@ -2,11 +2,18 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.color_transforms import PRESETS, apply_preset, preview_data_url, refine_presets
-from app.contracts import ColorExploreResponse, ColorVariant, ImageScore, ScoreResponse
+from app.contracts import (
+    ColorExploreResponse,
+    ColorTripletExploreResponse,
+    ColorVariant,
+    ImageScore,
+    ScoreResponse,
+)
 from app.image_io import ImageValidationError, load_image_bytes, validate_file_count
 from app.multi_scorer import build_metric_scores, get_para_scorer, ParaAestheticScorer
 from app.predictor import AestheticPredictor, PredictorUnavailableError, get_predictor
 from app.ranking import beautiful_label, rank_scores
+from app.tricolor_jobs import get_triplet_job, start_triplet_job
 
 
 app = FastAPI(title="Aesthetics Predictor API")
@@ -23,6 +30,21 @@ app.add_middleware(
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.post("/api/tricolor-explore", response_model=ColorTripletExploreResponse)
+async def tricolor_explore(
+    limit: int = Form(24),
+) -> ColorTripletExploreResponse:
+    return start_triplet_job(limit=max(1, limit), size=1000)
+
+
+@app.get("/api/tricolor-explore/{job_id}", response_model=ColorTripletExploreResponse)
+async def tricolor_explore_status(job_id: str) -> ColorTripletExploreResponse:
+    state = get_triplet_job(job_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Triplet exploration job not found.")
+    return state
 
 
 @app.post("/api/score", response_model=ScoreResponse)
