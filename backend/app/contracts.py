@@ -10,6 +10,7 @@ class ImageScore(BaseModel):
     isBeautiful: bool | None = None
     width: int | None = Field(default=None, ge=1)
     height: int | None = Field(default=None, ge=1)
+    averageRgb: list[int] | None = None
     error: str | None = None
 
 
@@ -72,6 +73,22 @@ class ColorTripletVariant(BaseModel):
     error: str | None = None
 
 
+class ColorSpectrumBin(BaseModel):
+    scoreFrom: float | None = None
+    scoreTo: float | None = None
+    count: int = Field(default=0, ge=0)
+    averageRgb: list[int] = Field(default_factory=list)
+    averageScore: float | None = None
+
+
+class ColorTripletSpectrum(BaseModel):
+    bins: list[ColorSpectrumBin] = Field(default_factory=list)
+    topAverageRgb: list[int] | None = None
+    bottomAverageRgb: list[int] | None = None
+    goodLabels: list[str] = Field(default_factory=list)
+    badLabels: list[str] = Field(default_factory=list)
+
+
 class ColorTripletExploreResponse(BaseModel):
     jobId: str | None = None
     status: str = Field(default="done")
@@ -83,5 +100,6 @@ class ColorTripletExploreResponse(BaseModel):
     bestScore: float | None = Field(default=None, ge=0, le=10)
     current: str | None = None
     device: str | None = None
+    spectrum: ColorTripletSpectrum | None = None
     variants: list[ColorTripletVariant] = Field(default_factory=list)
     error: str | None = None

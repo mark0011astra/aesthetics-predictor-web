@@ -56,7 +56,7 @@ def _rgb_to_hsv(rgb: tuple[int, int, int]) -> tuple[float, float, float]:
 
 
 def _warmth(rgb: tuple[int, int, int]) -> float:
-    red, green, blue = rgb
+    red, blue = rgb[0], rgb[2]
     return max(-1.0, min(1.0, (red - blue) / 255.0))
 
 
@@ -92,7 +92,10 @@ RGB_TRIPLET_PALETTE: tuple[ColorSwatchDef, ...] = (
 )
 
 
-def build_triplet_image(colors: tuple[ColorSwatchDef, ColorSwatchDef, ColorSwatchDef], size: int = 1000) -> Image.Image:
+def build_triplet_image(
+    colors: tuple[ColorSwatchDef, ColorSwatchDef, ColorSwatchDef],
+    size: int = 1000,
+) -> Image.Image:
     image = Image.new("RGB", (size, size))
     band_widths = [size // 3, size // 3, size - 2 * (size // 3)]
     x = 0
@@ -130,7 +133,10 @@ def _triplet_features(colors: tuple[ColorSwatchDef, ColorSwatchDef, ColorSwatchD
         for index, left in enumerate(swatches)
         for right in swatches[index + 1 :]
     ]
-    hue_spread = max((_circular_distance(left, right) for index, left in enumerate(hues) for right in hues[index + 1 :]), default=0.0)
+    hue_spread = max(
+        (_circular_distance(left, right) for index, left in enumerate(hues) for right in hues[index + 1 :]),
+        default=0.0,
+    )
     return TripletFeatures(
         left_luminance=luminances[0],
         middle_luminance=luminances[1],

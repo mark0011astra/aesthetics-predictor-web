@@ -1,5 +1,6 @@
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from PIL import Image, ImageStat
 
 from app.color_transforms import PRESETS, apply_preset, preview_data_url, refine_presets
 from app.contracts import (
@@ -13,7 +14,7 @@ from app.image_io import ImageValidationError, load_image_bytes, validate_file_c
 from app.multi_scorer import build_metric_scores, get_para_scorer, ParaAestheticScorer
 from app.predictor import AestheticPredictor, PredictorUnavailableError, get_predictor
 from app.ranking import beautiful_label, rank_scores
-from app.tricolor_jobs import get_triplet_job, start_triplet_job
+from app.tricolor_jobs import cancel_triplet_job, get_triplet_job, start_triplet_job
 
 
 app = FastAPI(title="Aesthetics Predictor API")
@@ -32,6 +33,11 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def _average_rgb(image: Image.Image) -> list[int]:
+    stats = ImageStat.Stat(image.convert("RGB").resize((32, 32)))
+    return [int(round(channel)) for channel in stats.mean[:3]]
+
+
 @app.post("/api/tricolor-explore", response_model=ColorTripletExploreResponse)
 async def tricolor_explore(
     limit: int = Form(24),
@@ -42,6 +48,14 @@ async def tricolor_explore(
 @app.get("/api/tricolor-explore/{job_id}", response_model=ColorTripletExploreResponse)
 async def tricolor_explore_status(job_id: str) -> ColorTripletExploreResponse:
     state = get_triplet_job(job_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Triplet exploration job not found.")
+    return state
+
+
+@app.post("/api/tricolor-explore/{job_id}/cancel", response_model=ColorTripletExploreResponse)
+async def tricolor_explore_cancel(job_id: str) -> ColorTripletExploreResponse:
+    state = cancel_triplet_job(job_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Triplet exploration job not found.")
     return state
@@ -93,11 +107,19 @@ async def score_images(
                     metrics=build_metric_scores(score, para_scores),
                     width=image.width,
                     height=image.height,
+                    averageRgb=_average_rgb(image),
                     isBeautiful=beautiful_label(score, threshold),
                 )
             )
         except (ImageValidationError, PredictorUnavailableError, RuntimeError) as exc:
-            results.append(ImageScore(id=image_id, filename=file.filename or image_id, error=str(exc)))
+            results.append(
+                ImageScore(
+                    id=image_id,
+                    filename=file.filename or image_id,
+                    averageRgb=_average_rgb(image),
+                    error=str(exc),
+                )
+            )
 
     return ScoreResponse(threshold=threshold, results=rank_scores(results, threshold))
 

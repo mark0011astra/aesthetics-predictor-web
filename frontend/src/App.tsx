@@ -1,7 +1,7 @@
-import { ChangeEvent, useEffect, useMemo, useState } from 'react';
+import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { ImagePlus, Loader2, Palette, RefreshCw, Star, UploadCloud } from 'lucide-react';
-import { exploreColors, exploreTriplets, getTripletExplore, scoreImages } from './api';
-import type { ColorExploreResponse, ColorTripletExploreResponse, ColorTripletFeatures, ColorSwatch, ImageScore } from './types';
+import { cancelTripletExplore, exploreColors, getTripletExplore, scoreImages, startTripletExplore } from './api';
+import type { ColorExploreResponse, ColorTripletExploreResponse, ColorTripletVariant, ImageScore } from './types';
 
 const ACCEPTED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 
@@ -43,6 +43,37 @@ const SORT_OPTIONS: { key: SortKey; label: string }[] = [
   { key: 'content', label: 'Content' }
 ];
 
+type SpectrumPoint = {
+  id: string;
+  filename: string;
+  score: number;
+  rgb: number[];
+  x: number;
+  y: number;
+  size: number;
+  opacity: number;
+  color: string;
+  label: string;
+  kind: 'good' | 'bad' | 'mid';
+};
+
+type SpectrumCluster = {
+  label: string;
+  count: number;
+  averageScore: number;
+  averageRgb: number[] | null;
+  averageX: number;
+  averageY: number;
+};
+
+type TripletProgress = {
+  done: number;
+  total: number;
+  current: string;
+  bestScore: number | null;
+  device: string | null;
+};
+
 function imageKey(image: LocalImage): string {
   return `${image.file.name}-${image.file.lastModified}-${image.file.size}`;
 }
@@ -60,15 +91,16 @@ export function App() {
   const [threshold, setThreshold] = useState(6);
   const [scores, setScores] = useState<ImageScore[]>([]);
   const [colorResult, setColorResult] = useState<ColorExploreResponse | null>(null);
-  const [tripletJob, setTripletJob] = useState<ColorTripletExploreResponse | null>(null);
   const [tripletResult, setTripletResult] = useState<ColorTripletExploreResponse | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
-  const [selectedTripletId, setSelectedTripletId] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>('total');
-  const [busy, setBusy] = useState<'score' | 'color' | 'triplet' | null>(null);
+  const [busy, setBusy] = useState<'score' | 'color' | null>(null);
   const [progress, setProgress] = useState('');
   const [scoringProgress, setScoringProgress] = useState<ScoringProgress | null>(null);
+  const [tripletBusy, setTripletBusy] = useState(false);
+  const [tripletError, setTripletError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const tripletTimerRef = useRef<number | null>(null);
 
   const scoreMap = useMemo(() => new Map(scores.map((score) => [score.id, score])), [scores]);
   const sortedImages = useMemo(() => {
@@ -81,53 +113,31 @@ export function App() {
   const selectedImage = sortedImages.find((image) => imageKey(image) === selectedKey) ?? sortedImages[0] ?? images[0];
   const selectedScore = selectedImage ? scoreMap.get(imageKey(selectedImage)) : undefined;
   const selectedSortOption = SORT_OPTIONS.find((option) => option.key === sortKey) ?? SORT_OPTIONS[0];
-  const selectedTriplet = tripletResult
-    ? tripletResult.variants.find((variant) => variant.id === selectedTripletId) ?? tripletResult.variants[0] ?? null
-    : null;
-  const selectedTripletScore = selectedTriplet?.score ?? null;
-  const selectedTripletDelta = selectedTriplet?.delta ?? null;
-  const tripletError = tripletResult?.error ?? tripletJob?.error ?? null;
-  const tripletProgress = tripletJob ? tripletJob.completedCombinations / Math.max(1, tripletJob.totalCombinations) : 0;
+  const spectrumPoints = useMemo(() => {
+    if (tripletResult?.variants?.length) {
+      return buildTripletSpectrumPoints(tripletResult.variants);
+    }
+    return buildSpectrumPoints(scores, sortedImages);
+  }, [scores, sortedImages, tripletResult]);
+  const spectrumClusters = useMemo(() => buildSpectrumClusters(spectrumPoints), [spectrumPoints]);
+  const tripletProgress = useMemo<TripletProgress | null>(() => {
+    if (!tripletResult) return null;
+    return {
+      done: tripletResult.completedCombinations,
+      total: tripletResult.totalCombinations,
+      current: tripletResult.current ?? '',
+      bestScore: tripletResult.bestScore,
+      device: tripletResult.device
+    };
+  }, [tripletResult]);
 
   useEffect(() => {
-    const jobId = tripletJob?.jobId;
-    const status = tripletJob?.status;
-    if (!jobId || status === 'done' || status === 'error') {
-      return;
-    }
-
-    let active = true;
-    const timer = window.setTimeout(async () => {
-      try {
-        const next = await getTripletExplore(jobId);
-        if (!active) return;
-        setTripletJob(next);
-        setProgress(
-          `${next.completedCombinations} / ${next.totalCombinations} 通りを評価中${next.current ? ` · ${next.current}` : ''}${next.device ? ` · ${next.device}` : ''}`
-        );
-        if (next.status === 'done') {
-          setTripletResult(next);
-          setSelectedTripletId(next.variants[0]?.id ?? null);
-          setProgress(`${next.totalCombinations} 通りを評価しました。`);
-          setBusy(null);
-        } else if (next.status === 'error') {
-          setError(next.error ?? '三分割色探索に失敗しました。');
-          setProgress('');
-          setBusy(null);
-        }
-      } catch (caught) {
-        if (!active) return;
-        setError(caught instanceof Error ? caught.message : '三分割色探索の進捗取得に失敗しました。');
-        setProgress('');
-        setBusy(null);
-      }
-    }, 650);
-
     return () => {
-      active = false;
-      window.clearTimeout(timer);
+      if (tripletTimerRef.current !== null) {
+        window.clearTimeout(tripletTimerRef.current);
+      }
     };
-  }, [tripletJob?.jobId, tripletJob?.status, tripletJob?.completedCombinations, tripletJob?.current, tripletJob?.device]);
+  }, []);
 
   function handleFiles(event: ChangeEvent<HTMLInputElement>) {
     const picked = Array.from(event.target.files ?? []);
@@ -172,6 +182,7 @@ export function App() {
               isBeautiful: null,
               width: null,
               height: null,
+              averageRgb: null,
               metrics: {},
               error: 'No result returned.'
             };
@@ -208,31 +219,70 @@ export function App() {
   }
 
   async function runTripletExplore() {
-    setBusy('triplet');
-    setError(null);
-    setProgress('1000x1000 の三分割色パターンを全探索しています...');
-    setTripletJob(null);
+    if (tripletBusy) return;
+    setTripletBusy(true);
+    setTripletError(null);
     setTripletResult(null);
-    setSelectedTripletId(null);
+    setProgress('3分割探索を開始しています...');
 
     try {
-      const response = await exploreTriplets(24);
-      setTripletJob(response);
-      if (response.status === 'done') {
-        setTripletResult(response);
-        setSelectedTripletId(response.variants[0]?.id ?? null);
-        setProgress(`${response.totalCombinations} 通りを評価しました。`);
-        setBusy(null);
+      const initial = await startTripletExplore(24);
+      setTripletResult(initial);
+      if (!isTripletFinished(initial.status)) {
+        scheduleTripletPolling(initial.jobId);
       } else {
-        setProgress(`${response.completedCombinations} / ${response.totalCombinations} 通りを評価中...`);
+        setTripletBusy(false);
+        setProgress('');
       }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : '三分割色探索に失敗しました。');
+      setTripletError(caught instanceof Error ? caught.message : '3分割探索に失敗しました。');
+      setTripletBusy(false);
       setProgress('');
-      setBusy(null);
-    } finally {
-      // busy state is cleared when the job finishes or fails in the polling loop.
     }
+  }
+
+  async function stopTripletExplore() {
+    if (!tripletResult?.jobId) return;
+    try {
+      const cancelled = await cancelTripletExplore(tripletResult.jobId);
+      setTripletResult(cancelled);
+    } catch (caught) {
+      setTripletError(caught instanceof Error ? caught.message : '3分割探索の停止に失敗しました。');
+    } finally {
+      if (tripletTimerRef.current !== null) {
+        window.clearTimeout(tripletTimerRef.current);
+        tripletTimerRef.current = null;
+      }
+      setTripletBusy(false);
+    }
+  }
+
+  function scheduleTripletPolling(jobId: string | null) {
+    if (!jobId) return;
+    if (tripletTimerRef.current !== null) {
+      window.clearTimeout(tripletTimerRef.current);
+    }
+    tripletTimerRef.current = window.setTimeout(async () => {
+      try {
+        const latest = await getTripletExplore(jobId);
+        setTripletResult(latest);
+        if (!isTripletFinished(latest.status)) {
+          scheduleTripletPolling(jobId);
+        } else {
+          setTripletBusy(false);
+          tripletTimerRef.current = null;
+          setProgress('');
+        }
+      } catch (caught) {
+        setTripletError(caught instanceof Error ? caught.message : '3分割探索の進捗取得に失敗しました。');
+        setTripletBusy(false);
+        tripletTimerRef.current = null;
+      }
+    }, 500);
+  }
+
+  function isTripletFinished(status: string): boolean {
+    return status === 'done' || status === 'error' || status === 'cancelled';
   }
 
   return (
@@ -240,7 +290,7 @@ export function App() {
       <section className="workspace">
         <header className="topbar">
           <div>
-            <p className="eyebrow">Local Aesthetics Predictor</p>
+            <p className="eyebrow">Local aesthetics predictor</p>
             <h1>画像の美的スコアを比較</h1>
           </div>
           <div className="threshold-control">
@@ -262,35 +312,42 @@ export function App() {
 
         <div className="toolbar">
           <label className="upload-button">
-            <UploadCloud aria-hidden="true" size={20} />
+            <UploadCloud size={18} />
             <span>画像を選択</span>
-            <input type="file" accept="image/jpeg,image/png,image/webp" multiple onChange={handleFiles} />
+            <input type="file" accept={ACCEPTED_TYPES.join(',')} multiple onChange={handleFiles} />
           </label>
-          <button type="button" onClick={runScoring} disabled={images.length === 0 || busy !== null}>
+          <button type="button" onClick={runScoring} disabled={busy !== null || images.length === 0}>
             {busy === 'score' ? <Loader2 className="spin" size={18} /> : <Star size={18} />}
             スコアリング
           </button>
-          <button type="button" onClick={runColorExplore} disabled={images.length === 0 || busy !== null}>
-            {busy === 'color' ? <Loader2 className="spin" size={18} /> : <Palette size={18} />}
+          <button type="button" onClick={runColorExplore} disabled={busy !== null || !selectedImage}>
+            <Palette size={18} />
             色探索
           </button>
-          <button type="button" onClick={runTripletExplore} disabled={busy !== null}>
-            {busy === 'triplet' ? <Loader2 className="spin" size={18} /> : <Palette size={18} />}
+          <button type="button" onClick={runTripletExplore} disabled={tripletBusy}>
+            {tripletBusy ? <Loader2 className="spin" size={18} /> : <Palette size={18} />}
             3分割探索
           </button>
           <button
             type="button"
             className="ghost"
             onClick={() => {
+              images.forEach((image) => URL.revokeObjectURL(image.url));
+              setImages([]);
               setScores([]);
               setColorResult(null);
               setTripletResult(null);
-              setSelectedTripletId(null);
+              setTripletError(null);
+              setSelectedKey(null);
               setProgress('');
-              setScoringProgress(null);
               setError(null);
+              setScoringProgress(null);
+              if (tripletTimerRef.current !== null) {
+                window.clearTimeout(tripletTimerRef.current);
+                tripletTimerRef.current = null;
+              }
+              setTripletBusy(false);
             }}
-            disabled={busy !== null}
           >
             <RefreshCw size={18} />
             結果をクリア
@@ -308,14 +365,18 @@ export function App() {
           </select>
         </div>
 
-        {progress && <p className="status">{progress}</p>}
+        {progress && (
+          <p className="status" aria-live="polite">
+            {progress}
+          </p>
+        )}
         {scoringProgress && (
           <div className="progress-panel" aria-label="スコアリング進捗">
             <div>
               <strong>
-                {scoringProgress.done} / {scoringProgress.total}
+                {scoringProgress.done}/{scoringProgress.total}
               </strong>
-              <span>{scoringProgress.current || '完了'}</span>
+              <span>{scoringProgress.current}</span>
             </div>
             <progress value={scoringProgress.done} max={scoringProgress.total} />
           </div>
@@ -383,6 +444,95 @@ export function App() {
 
           <div className="panel">
             <div className="panel-title">
+              <h2>RGB spectrum</h2>
+              <span>good / bad の点群を俯瞰</span>
+            </div>
+            {spectrumPoints.length === 0 ? (
+              <div className="empty-state">
+                <Palette size={36} />
+                <p>スコアリングすると RGB の分布と評価の偏りを点で見られます。</p>
+              </div>
+            ) : (
+              <SpectrumPanel points={spectrumPoints} clusters={spectrumClusters} />
+            )}
+          </div>
+
+          <div className="panel">
+            <div className="panel-title">
+              <h2>3分割探索</h2>
+              <span>3色の組み合わせを総当たり</span>
+            </div>
+            {!tripletResult ? (
+              <div className="empty-state">
+                <Palette size={36} />
+                <p>ボタンを押すと 3 色の組み合わせを評価して、スコア順に並べます。</p>
+              </div>
+            ) : (
+              <>
+                <div className="job-progress">
+                  <div className="job-progress-head">
+                    <div>
+                      <strong>
+                        {tripletProgress?.done}/{tripletProgress?.total}
+                      </strong>
+                      <span>{tripletResult.status === 'done' ? '完了' : tripletResult.status}</span>
+                    </div>
+                    <div className="job-progress-meta">
+                      {tripletProgress?.current && <span>{tripletProgress.current}</span>}
+                      {tripletProgress?.device && <span>{tripletProgress.device}</span>}
+                      {typeof tripletProgress?.bestScore === 'number' && <span>best {tripletProgress.bestScore.toFixed(2)}</span>}
+                      {tripletBusy && (
+                        <button type="button" className="inline-stop" onClick={stopTripletExplore}>
+                          中止
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <progress value={tripletProgress?.done ?? 0} max={tripletProgress?.total ?? 1} />
+                </div>
+                {tripletError && <p className="error">{tripletError}</p>}
+                {tripletResult.variants.length === 0 ? (
+                  <div className="empty-state">
+                    <Palette size={36} />
+                    <p>進捗のあとに上位候補がここへ表示されます。</p>
+                  </div>
+                ) : (
+                  <div className="triplet-grid">
+                    {tripletResult.variants.map((variant) => (
+                      <article className="triplet-card" key={variant.id}>
+                        {variant.preview ? (
+                          <img src={variant.preview} alt="" />
+                        ) : (
+                          <div className="triplet-fallback" aria-hidden="true" />
+                        )}
+                        <div className="variant-meta">
+                          <strong>{variant.rank ? `#${variant.rank} ${variant.label}` : variant.label}</strong>
+                          {variant.score === null ? (
+                            <span className="bad">{variant.error}</span>
+                          ) : (
+                            <span>
+                              {variant.score.toFixed(2)} / 10
+                              {variant.summary ? <em>{variant.summary}</em> : null}
+                            </span>
+                          )}
+                        </div>
+                        <div className="swatch-row">
+                          {variant.colors.map((color) => (
+                            <span className="swatch-chip tiny" key={color.id} title={`${color.label} RGB(${color.rgb.join(', ')})`}>
+                              <i style={{ backgroundColor: color.hex }} />
+                            </span>
+                          ))}
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
+          <div className="panel">
+            <div className="panel-title">
               <h2>色変更探索</h2>
               <span>初期約20候補 + 上位を再探索</span>
             </div>
@@ -405,7 +555,8 @@ export function App() {
                           {variant.score?.toFixed(2)} / 10
                           {variant.delta !== null && (
                             <em className={variant.delta >= 0 ? 'up' : 'down'}>
-                              {variant.delta >= 0 ? '+' : ''}{variant.delta.toFixed(2)}
+                              {variant.delta >= 0 ? '+' : ''}
+                              {variant.delta.toFixed(2)}
                             </em>
                           )}
                         </span>
@@ -414,125 +565,6 @@ export function App() {
                   </article>
                 ))}
               </div>
-            )}
-          </div>
-
-          <div className="panel">
-            <div className="panel-title">
-              <h2>三分割色探索</h2>
-              <span>{tripletJob ? `${tripletJob.totalCombinations} 通り / 1000×1000` : 'RGB 2197 通りを評価'}</span>
-            </div>
-            {!tripletJob && !tripletResult ? (
-              <div className="empty-state">
-                <Palette size={36} />
-                <p>1000×1000 の正方形を 3 分割して、RGB パレット 2197 通りを探索します。</p>
-              </div>
-            ) : (
-              <>
-                <div className="job-progress">
-                  <div className="job-progress-head">
-                    <div>
-                      <strong>
-                        {(tripletJob?.completedCombinations ?? tripletResult?.completedCombinations ?? 0)}/
-                        {tripletJob?.totalCombinations ?? tripletResult?.totalCombinations ?? 0}
-                      </strong>
-                      <span>{tripletJob?.current ?? tripletResult?.current ?? 'waiting'}</span>
-                    </div>
-                    <div className="job-progress-meta">
-                      <span>{Math.round(tripletProgress * 100)}%</span>
-                      {(tripletJob?.device ?? tripletResult?.device) && (
-                        <span>{tripletJob?.device ?? tripletResult?.device}</span>
-                      )}
-                      {(tripletJob?.status ?? tripletResult?.status) && (
-                        <span>{tripletJob?.status ?? tripletResult?.status}</span>
-                      )}
-                    </div>
-                  </div>
-                  <progress
-                    value={tripletJob?.completedCombinations ?? tripletResult?.completedCombinations ?? 0}
-                    max={tripletJob?.totalCombinations ?? tripletResult?.totalCombinations ?? 1}
-                  />
-                </div>
-                {tripletError ? (
-                  <div className="empty-state">
-                    <Palette size={36} />
-                    <p>{tripletError}</p>
-                  </div>
-                ) : null}
-                <section className="triplet-preview">
-                  {selectedTriplet?.preview ? (
-                    <img src={selectedTriplet.preview} alt={selectedTriplet.label} />
-                  ) : (
-                    <div className="selected-preview-empty">
-                      {tripletJob?.status === 'done' ? '結果を選ぶとここに大きく表示します。' : '探索中です。'}
-                    </div>
-                  )}
-                  <div className="triplet-preview-meta">
-                    <span>選択中</span>
-                    <strong>{selectedTriplet?.label ?? '未選択'}</strong>
-                    <p>
-                      {selectedTripletScore !== null
-                        ? `Score: ${selectedTripletScore.toFixed(2)} / 10`
-                        : '未解析'}
-                      {selectedTripletDelta !== null && (
-                        <em className={selectedTripletDelta >= 0 ? 'up' : 'down'}>
-                          {selectedTripletDelta >= 0 ? '+' : ''}
-                          {selectedTripletDelta.toFixed(2)}
-                        </em>
-                      )}
-                    </p>
-                    <TripletSwatchRow colors={selectedTriplet?.colors ?? []} />
-                    <TripletFeaturePanel
-                      features={selectedTriplet?.features ?? null}
-                      tags={selectedTriplet?.tags ?? []}
-                      summary={selectedTriplet?.summary ?? null}
-                    />
-                  </div>
-                </section>
-                <div className="palette-strip">
-                  {(tripletResult?.palette ?? tripletJob?.palette ?? []).map((color) => (
-                    <span key={color.id} className="palette-chip" title={color.label}>
-                      <i style={{ backgroundColor: color.hex }} />
-                      <span className="palette-label">
-                        {color.label}
-                        <small>{formatRgb(color.rgb)}</small>
-                      </span>
-                    </span>
-                  ))}
-                </div>
-                <div className="triplet-grid">
-                  {(tripletResult?.variants ?? []).map((variant) => (
-                    <button
-                      className={variant.id === selectedTriplet?.id ? 'triplet-card selected' : 'triplet-card'}
-                      type="button"
-                      key={variant.id}
-                      onClick={() => setSelectedTripletId(variant.id)}
-                    >
-                      {variant.preview ? <img src={variant.preview} alt={variant.label} /> : <div className="triplet-fallback" />}
-                      <div className="variant-meta">
-                        <strong>{variant.rank ? `#${variant.rank}` : '--'}</strong>
-                        <span title={variant.label}>{variant.label}</span>
-                        {variant.summary && <small className="variant-summary">{variant.summary}</small>}
-                        {variant.error ? (
-                          <small className="row-error">{variant.error}</small>
-                        ) : (
-                          <span>
-                            {variant.score !== null ? `${variant.score.toFixed(2)} / 10` : '--'}
-                            {variant.delta !== null && (
-                              <em className={variant.delta >= 0 ? 'up' : 'down'}>
-                                {variant.delta >= 0 ? '+' : ''}
-                                {variant.delta.toFixed(2)}
-                              </em>
-                            )}
-                          </span>
-                        )}
-                      </div>
-                      <TripletSwatchRow colors={variant.colors} compact />
-                      <TripletFeatureBars features={variant.features} />
-                    </button>
-                  ))}
-                </div>
-              </>
             )}
           </div>
         </section>
@@ -544,6 +576,10 @@ export function App() {
 function ScoreBadge({ result, sortKey, label }: { result?: ImageScore; sortKey: SortKey; label: string }) {
   if (!result) {
     return <span className="score-badge muted">未解析</span>;
+  }
+
+  function isTripletFinished(status: string): boolean {
+    return status === 'done' || status === 'error' || status === 'cancelled';
   }
   if (result.error) {
     return <span className="score-badge bad">Error</span>;
@@ -579,122 +615,238 @@ function MetricStrip({ result, compact = false }: { result: ImageScore; compact?
   );
 }
 
-function TripletSwatchRow({ colors, compact = false }: { colors: ColorSwatch[]; compact?: boolean }) {
-  if (colors.length === 0) {
-    return null;
-  }
-
+function SpectrumPanel({ points, clusters }: { points: SpectrumPoint[]; clusters: SpectrumCluster[] }) {
   return (
-    <div className={compact ? 'triplet-swatch-row compact' : 'triplet-swatch-row'}>
-      {colors.map((color) => (
-        <span key={color.id} className="triplet-swatch">
-          <i style={{ backgroundColor: color.hex }} />
-          <span>
-            {color.label}
-            <small>{formatRgb(color.rgb)}</small>
+    <section className="spectrum-panel">
+      <div className="spectrum-stage">
+        <div className="spectrum-backdrop" aria-hidden="true" />
+        {points.map((point) => (
+          <span
+            key={point.id}
+            className={`spectrum-point ${point.kind}`}
+            title={`${point.filename}\n${point.label}\n${point.rgb.join(', ')}`}
+            style={{
+              left: `${point.x}%`,
+              top: `${point.y}%`,
+              width: `${point.size}px`,
+              height: `${point.size}px`,
+              backgroundColor: point.color,
+              opacity: point.opacity
+            }}
+          />
+        ))}
+        {clusters.map((cluster) => (
+          <span
+            key={cluster.label}
+            className={`spectrum-cluster ${cluster.label}`}
+            title={`${cluster.label} / ${cluster.count} 枚 / RGB(${cluster.averageRgb?.join(', ') ?? '--'})`}
+            style={{
+              left: `${cluster.averageX}%`,
+              top: `${cluster.averageY}%`
+            }}
+          >
+            <i style={{ backgroundColor: cluster.label === 'good' ? '#86f3c6' : '#ff8f7d' }} />
           </span>
-        </span>
-      ))}
-    </div>
-  );
-}
-
-function TripletFeaturePanel({
-  features,
-  tags,
-  summary
-}: {
-  features: ColorTripletFeatures | null;
-  tags: string[];
-  summary: string | null;
-}) {
-  if (!features) {
-    return null;
-  }
-
-  return (
-    <div className="triplet-feature-panel">
-      {summary && <p className="triplet-summary">{summary}</p>}
-      <div className="triplet-feature-grid">
-        <span>
-          <b>Contrast</b>
-          {features.luminanceContrast.toFixed(2)}
-        </span>
-        <span>
-          <b>Brightness</b>
-          {features.meanLuminance.toFixed(2)}
-        </span>
-        <span>
-          <b>Saturation</b>
-          {features.saturationMean.toFixed(2)}
-        </span>
-        <span>
-          <b>Warmth</b>
-          {features.warmthMean.toFixed(2)}
-        </span>
-        <span>
-          <b>Hue spread</b>
-          {features.hueSpread.toFixed(2)}
-        </span>
-        <span>
-          <b>RGB dist</b>
-          {features.rgbDistance.toFixed(2)}
-        </span>
-      </div>
-      <div className="triplet-band-bars" aria-label="band luminance">
-        <BandBar label="L" value={features.leftLuminance} />
-        <BandBar label="M" value={features.middleLuminance} />
-        <BandBar label="R" value={features.rightLuminance} />
-      </div>
-      <div className="triplet-tags">
-        {tags.map((tag) => (
-          <span key={tag}>{tag}</span>
         ))}
       </div>
-    </div>
+      <div className="spectrum-legend" aria-label="RGB mapping">
+        <span className="legend-title">RGB mapping</span>
+        <span>x: hue</span>
+        <span>y: brightness / saturation</span>
+        <span>dot color: score</span>
+        <span>R</span>
+        <span>Y</span>
+        <span>G</span>
+        <span>C</span>
+        <span>B</span>
+        <span>M</span>
+      </div>
+      <div className="spectrum-summary">
+        {clusters.map((cluster) => (
+          <div key={cluster.label}>
+            <span>{cluster.label}</span>
+            <p>
+              {cluster.count} 枚 · score {cluster.averageScore.toFixed(2)} · RGB
+              {cluster.averageRgb ? `(${cluster.averageRgb.join(', ')})` : '--'}
+            </p>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 
-function TripletFeatureBars({ features }: { features: ColorTripletFeatures | null }) {
-  if (!features) {
-    return null;
+function buildSpectrumPoints(scores: ImageScore[], images: LocalImage[]): SpectrumPoint[] {
+  const entries = images
+    .map((image) => {
+      const result = scores.find((score) => score.id === imageKey(image));
+      const score = result?.score ?? null;
+      const rgb = result?.averageRgb ?? null;
+      return {
+        image,
+        result,
+        score,
+        rgb
+      };
+    })
+    .filter((entry): entry is { image: LocalImage; result: ImageScore | undefined; score: number; rgb: number[] } => {
+      return typeof entry.score === 'number' && Array.isArray(entry.rgb) && entry.rgb.length === 3;
+    });
+
+  if (entries.length === 0) {
+    return [];
   }
 
-  return (
-    <div className="triplet-bars">
-      <BandBar label="L" value={features.leftLuminance} compact />
-      <BandBar label="M" value={features.middleLuminance} compact />
-      <BandBar label="R" value={features.rightLuminance} compact />
-      <div className="triplet-chipline">
-        <span title="Contrast">
-          C {features.luminanceContrast.toFixed(2)}
-        </span>
-        <span title="Saturation">
-          S {features.saturationMean.toFixed(2)}
-        </span>
-        <span title="Warmth">
-          W {features.warmthMean.toFixed(2)}
-        </span>
-      </div>
-    </div>
-  );
+  const sorted = [...entries].sort((left, right) => right.score - left.score);
+  const minScore = Math.min(...sorted.map((entry) => entry.score));
+  const maxScore = Math.max(...sorted.map((entry) => entry.score));
+  const topCutoff = Math.max(3, Math.ceil(sorted.length * 0.2));
+  const bottomCutoff = Math.max(3, Math.ceil(sorted.length * 0.2));
+  const topIds = new Set(sorted.slice(0, topCutoff).map((entry) => imageKey(entry.image)));
+  const bottomIds = new Set(sorted.slice(-bottomCutoff).map((entry) => imageKey(entry.image)));
+
+  return entries.map(({ image, result, score, rgb }) => {
+    const { hue, saturation, value } = rgbToHsv(rgb);
+    const normalizedScore = maxScore === minScore ? 0.5 : (score - minScore) / (maxScore - minScore);
+    const x = clamp(hue / 360) * 100;
+    const y = clamp(1 - value) * 85 + clamp(1 - saturation) * 15;
+    const kind = topIds.has(imageKey(image)) ? 'good' : bottomIds.has(imageKey(image)) ? 'bad' : 'mid';
+    return {
+      id: imageKey(image),
+      filename: result?.filename ?? image.file.name,
+      score,
+      rgb,
+      x,
+      y,
+      size: kind === 'good' ? 12 : kind === 'bad' ? 10 : 8,
+      opacity: kind === 'mid' ? 0.82 : 1,
+      color: scoreToColor(normalizedScore),
+      label: `${result?.filename ?? image.file.name} · ${score.toFixed(2)}`,
+      kind
+    };
+  });
 }
 
-function BandBar({ label, value, compact = false }: { label: string; value: number; compact?: boolean }) {
-  return (
-    <div className={compact ? 'band-bar compact' : 'band-bar'}>
-      <span>{label}</span>
-      <div className="band-track">
-        <i style={{ width: `${Math.round(value * 100)}%` }} />
-      </div>
-      <small>{value.toFixed(2)}</small>
-    </div>
-  );
-}
+function buildTripletSpectrumPoints(variants: ColorTripletVariant[]): SpectrumPoint[] {
+  const entries = variants
+    .map((variant) => {
+      const score = variant.score ?? null;
+      const rgb = variant.colors.length
+        ? [
+            Math.round(variant.colors.reduce((sum, color) => sum + color.rgb[0], 0) / variant.colors.length),
+            Math.round(variant.colors.reduce((sum, color) => sum + color.rgb[1], 0) / variant.colors.length),
+            Math.round(variant.colors.reduce((sum, color) => sum + color.rgb[2], 0) / variant.colors.length)
+          ]
+        : null;
+      return {
+        variant,
+        score,
+        rgb
+      };
+    })
+    .filter((entry): entry is { variant: ColorTripletVariant; score: number; rgb: number[] } => {
+      return typeof entry.score === 'number' && Array.isArray(entry.rgb) && entry.rgb.length === 3;
+    });
 
-function formatRgb(rgb: number[]): string {
-  if (rgb.length !== 3) {
-    return 'RGB(--)';
+  if (entries.length === 0) {
+    return [];
   }
-  return `RGB(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
+
+  const sorted = [...entries].sort((left, right) => right.score - left.score);
+  const minScore = Math.min(...sorted.map((entry) => entry.score));
+  const maxScore = Math.max(...sorted.map((entry) => entry.score));
+  const topCutoff = Math.max(3, Math.ceil(sorted.length * 0.2));
+  const bottomCutoff = Math.max(3, Math.ceil(sorted.length * 0.2));
+  const topIds = new Set(sorted.slice(0, topCutoff).map((entry) => entry.variant.id));
+  const bottomIds = new Set(sorted.slice(-bottomCutoff).map((entry) => entry.variant.id));
+
+  return entries.map(({ variant, score, rgb }) => {
+    const { hue, saturation, value } = rgbToHsv(rgb);
+    const normalizedScore = maxScore === minScore ? 0.5 : (score - minScore) / (maxScore - minScore);
+    const x = clamp(hue / 360) * 100;
+    const y = clamp(1 - value) * 85 + clamp(1 - saturation) * 15;
+    const kind = topIds.has(variant.id) ? 'good' : bottomIds.has(variant.id) ? 'bad' : 'mid';
+    return {
+      id: variant.id,
+      filename: variant.label,
+      score,
+      rgb,
+      x,
+      y,
+      size: kind === 'good' ? 12 : kind === 'bad' ? 10 : 8,
+      opacity: kind === 'mid' ? 0.82 : 1,
+      color: scoreToColor(normalizedScore),
+      label: `${variant.label} · ${score.toFixed(2)}`,
+      kind
+    };
+  });
+}
+
+function buildSpectrumClusters(points: SpectrumPoint[]): SpectrumCluster[] {
+  if (points.length === 0) {
+    return [];
+  }
+  const sorted = [...points].sort((left, right) => right.score - left.score);
+  const groupSize = Math.max(3, Math.ceil(sorted.length * 0.2));
+  return [
+    makeCluster('good', sorted.slice(0, groupSize)),
+    makeCluster('bad', sorted.slice(-groupSize))
+  ];
+}
+
+function makeCluster(label: 'good' | 'bad', points: SpectrumPoint[]): SpectrumCluster {
+  const averageScore = points.reduce((sum, point) => sum + point.score, 0) / Math.max(1, points.length);
+  const averageRgb = points.length
+    ? [
+        Math.round(points.reduce((sum, point) => sum + point.rgb[0], 0) / points.length),
+        Math.round(points.reduce((sum, point) => sum + point.rgb[1], 0) / points.length),
+        Math.round(points.reduce((sum, point) => sum + point.rgb[2], 0) / points.length)
+      ]
+    : null;
+  const averageX = points.length ? points.reduce((sum, point) => sum + point.x, 0) / points.length : 50;
+  const averageY = points.length ? points.reduce((sum, point) => sum + point.y, 0) / points.length : 50;
+  return {
+    label,
+    count: points.length,
+    averageScore,
+    averageRgb,
+    averageX,
+    averageY
+  };
+}
+
+function rgbToHsv(rgb: number[]): { hue: number; saturation: number; value: number } {
+  const [red, green, blue] = rgb.map((channel) => channel / 255);
+  const max = Math.max(red, green, blue);
+  const min = Math.min(red, green, blue);
+  const delta = max - min;
+
+  let hue = 0;
+  if (delta !== 0) {
+    if (max === red) {
+      hue = 60 * (((green - blue) / delta) % 6);
+    } else if (max === green) {
+      hue = 60 * ((blue - red) / delta + 2);
+    } else {
+      hue = 60 * ((red - green) / delta + 4);
+    }
+  }
+  if (hue < 0) {
+    hue += 360;
+  }
+
+  const saturation = max === 0 ? 0 : delta / max;
+  const value = max;
+
+  return { hue, saturation, value };
+}
+
+function scoreToColor(ratio: number): string {
+  const clamped = clamp(ratio);
+  const hue = 8 + clamped * 118;
+  return `hsl(${hue} 82% 58%)`;
+}
+
+function clamp(value: number, min = 0, max = 1): number {
+  return Math.max(min, Math.min(max, value));
 }

@@ -8,6 +8,7 @@ from app.contracts import (
     ColorSwatch,
     ColorTripletExploreResponse,
     ColorTripletFeatures,
+    ColorTripletSpectrum,
     ColorTripletVariant,
 )
 from app.predictor import PredictorUnavailableError, get_predictor
@@ -39,6 +40,14 @@ def start_triplet_job(limit: int = 24, size: int = 1000) -> ColorTripletExploreR
         _jobs[job_id] = state
     Thread(target=_run_triplet_job, args=(job_id,), daemon=True).start()
     return _to_response(state)
+
+
+def cancel_triplet_job(job_id: str) -> ColorTripletExploreResponse | None:
+    state = _get_state(job_id)
+    if state is None:
+        return None
+    _update_state(job_id, status="cancelled")
+    return _to_response(_get_state(job_id) or state)
 
 
 def get_triplet_job(job_id: str) -> ColorTripletExploreResponse | None:

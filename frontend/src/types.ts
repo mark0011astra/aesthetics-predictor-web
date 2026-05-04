@@ -7,6 +7,7 @@ export type ImageScore = {
   isBeautiful: boolean | null;
   width: number | null;
   height: number | null;
+  averageRgb: number[] | null;
   error: string | null;
 };
 
@@ -42,6 +43,19 @@ export type ColorSwatch = {
   warmth: number;
 };
 
+export type ColorTripletFeatures = {
+  leftLuminance: number;
+  middleLuminance: number;
+  rightLuminance: number;
+  meanLuminance: number;
+  luminanceContrast: number;
+  saturationMean: number;
+  saturationRange: number;
+  warmthMean: number;
+  hueSpread: number;
+  rgbDistance: number;
+};
+
 export type ColorTripletVariant = {
   id: string;
   label: string;
@@ -56,6 +70,22 @@ export type ColorTripletVariant = {
   error: string | null;
 };
 
+export type ColorSpectrumBin = {
+  scoreFrom: number | null;
+  scoreTo: number | null;
+  count: number;
+  averageRgb: number[];
+  averageScore: number | null;
+};
+
+export type ColorTripletSpectrum = {
+  bins: ColorSpectrumBin[];
+  topAverageRgb: number[] | null;
+  bottomAverageRgb: number[] | null;
+  goodLabels: string[];
+  badLabels: string[];
+};
+
 export type ColorTripletExploreResponse = {
   jobId: string | null;
   status: string;
@@ -67,19 +97,7 @@ export type ColorTripletExploreResponse = {
   bestScore: number | null;
   current: string | null;
   device: string | null;
+  spectrum: ColorTripletSpectrum | null;
   variants: ColorTripletVariant[];
   error: string | null;
-};
-
-export type ColorTripletFeatures = {
-  leftLuminance: number;
-  middleLuminance: number;
-  rightLuminance: number;
-  meanLuminance: number;
-  luminanceContrast: number;
-  saturationMean: number;
-  saturationRange: number;
-  warmthMean: number;
-  hueSpread: number;
-  rgbDistance: number;
 };

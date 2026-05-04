@@ -191,19 +191,21 @@ def test_score_endpoint_returns_combined_and_individual_metrics(monkeypatch: pyt
     )
 
     assert response.status_code == 200
-    metrics = response.json()["results"][0]["metrics"]
+    result = response.json()["results"][0]
+    metrics = result["metrics"]
     assert metrics["laion"] == 4.0
     assert metrics["overall"] == 3.5
     assert metrics["total"] is not None
     assert metrics["balanced"] is not None
     assert metrics["harmonic"] is not None
+    assert result["averageRgb"] == [120, 80, 200]
 
 
 def test_tricolor_start_endpoint_returns_job_shell(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_start_job(limit: int, size: int) -> ColorTripletExploreResponse:
         return ColorTripletExploreResponse(
             jobId="job-123",
-            status="queued",
+            status="running",
             canvasSize=size,
             palette=[],
             totalCombinations=2197,
@@ -224,5 +226,33 @@ def test_tricolor_start_endpoint_returns_job_shell(monkeypatch: pytest.MonkeyPat
     assert response.status_code == 200
     payload = response.json()
     assert payload["jobId"] == "job-123"
-    assert payload["status"] == "queued"
+    assert payload["status"] == "running"
     assert payload["totalCombinations"] == 2197
+
+
+def test_tricolor_cancel_endpoint_returns_cancelled_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_cancel_job(job_id: str) -> ColorTripletExploreResponse:
+        return ColorTripletExploreResponse(
+            jobId=job_id,
+            status="cancelled",
+            canvasSize=1000,
+            palette=[],
+            totalCombinations=2197,
+            completedCombinations=120,
+            limit=24,
+            bestScore=4.2,
+            current=None,
+            device="mps",
+            variants=[],
+            error=None,
+        )
+
+    monkeypatch.setattr("app.main.cancel_triplet_job", fake_cancel_job)
+    client = TestClient(app)
+
+    response = client.post("/api/tricolor-explore/job-123/cancel")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "cancelled"
+    assert payload["completedCombinations"] == 120

@@ -36,11 +36,11 @@ export async function exploreColors(file: File, threshold: number): Promise<Colo
   return response.json();
 }
 
-export async function exploreTriplets(limit = 24): Promise<ColorTripletExploreResponse> {
+export async function startTripletExplore(limit: number): Promise<ColorTripletExploreResponse> {
   const body = new FormData();
   body.append('limit', String(limit));
 
-  const response = await fetch(`${API_BASE}/api/tricolor-explore`, {
+  const response = await fetch('/api/tricolor-explore', {
     method: 'POST',
     body
   });
@@ -53,7 +53,22 @@ export async function exploreTriplets(limit = 24): Promise<ColorTripletExploreRe
 }
 
 export async function getTripletExplore(jobId: string): Promise<ColorTripletExploreResponse> {
-  const response = await fetch(`${API_BASE}/api/tricolor-explore/${jobId}`);
+  const response = await fetch(`/api/tricolor-explore/${jobId}`, {
+    method: 'GET',
+    cache: 'no-store'
+  });
+
+  if (!response.ok) {
+    throw new Error(await responseText(response));
+  }
+
+  return response.json();
+}
+
+export async function cancelTripletExplore(jobId: string): Promise<ColorTripletExploreResponse> {
+  const response = await fetch(`/api/tricolor-explore/${jobId}/cancel`, {
+    method: 'POST'
+  });
 
   if (!response.ok) {
     throw new Error(await responseText(response));
